@@ -63,7 +63,17 @@ defmodule AshAi.Tools do
 
     actor = context[:actor]
     tenant = context[:tenant]
-    input = arguments["input"] || %{}
+
+    # This prevents crashing on load arguments that are not explicitly defined in the action
+    input = extract_action_params(arguments["input"] || %{}, action)
+
+    resolved_load =
+      case load do
+        func when is_function(func, 1) -> func.(arguments["input"] || %{})
+        list when is_list(list) -> list
+        _ -> []
+      end
+
     opts = [domain: domain, actor: actor, tenant: tenant, context: context[:context] || %{}]
 
     callbacks = context[:tool_callbacks] || %{}
@@ -142,7 +152,7 @@ defmodule AshAi.Tools do
               case result_type do
                 "run_query" ->
                   query
-                  |> Ash.Actions.Read.unpaginated_read(action, load: load)
+                  |> Ash.Actions.Read.unpaginated_read(action, load: resolved_load)
                   |> case do
                     {:ok, value} ->
                       value
@@ -153,7 +163,7 @@ defmodule AshAi.Tools do
                   |> then(fn result ->
                     result
                     |> AshAi.Serializer.serialize_value({:array, resource}, [], domain,
-                      load: load
+                      load: resolved_load
                     )
                     |> Jason.encode!()
                     |> then(&{:ok, &1, result})
@@ -251,7 +261,7 @@ defmodule AshAi.Tools do
                 return_errors?: true,
                 notify?: true,
                 strategy: [:atomic, :stream, :atomic_batches],
-                load: load,
+                load: resolved_load,
                 allow_stream_with: :full_read,
                 return_records?: true
               )
@@ -259,7 +269,7 @@ defmodule AshAi.Tools do
             |> case do
               %Ash.BulkResult{status: :success, records: [result]} ->
                 result
-                |> AshAi.Serializer.serialize_value(resource, [], domain, load: load)
+                |> AshAi.Serializer.serialize_value(resource, [], domain, load: resolved_load)
                 |> Jason.encode!()
                 |> then(&{:ok, &1, result})
 
@@ -281,7 +291,7 @@ defmodule AshAi.Tools do
               Keyword.merge(opts,
                 return_errors?: true,
                 notify?: true,
-                load: load,
+                load: resolved_load,
                 strategy: [:atomic, :stream, :atomic_batches],
                 allow_stream_with: :full_read,
                 return_records?: true
@@ -290,7 +300,7 @@ defmodule AshAi.Tools do
             |> case do
               %Ash.BulkResult{status: :success, records: [result]} ->
                 result
-                |> AshAi.Serializer.serialize_value(resource, [], domain, load: load)
+                |> AshAi.Serializer.serialize_value(resource, [], domain, load: resolved_load)
                 |> Jason.encode!()
                 |> then(&{:ok, &1, result})
 
@@ -303,10 +313,10 @@ defmodule AshAi.Tools do
           :create ->
             resource
             |> Ash.Changeset.for_create(action.name, input, opts)
-            |> Ash.create!(load: load)
+            |> Ash.create!(load: resolved_load)
             |> then(fn result ->
               result
-              |> AshAi.Serializer.serialize_value(resource, [], domain, load: load)
+              |> AshAi.Serializer.serialize_value(resource, [], domain, load: resolved_load)
               |> Jason.encode!()
               |> then(&{:ok, &1, result})
             end)
@@ -318,7 +328,9 @@ defmodule AshAi.Tools do
             |> then(fn result ->
               if action.returns do
                 result
-                |> AshAi.Serializer.serialize_value(action.returns, [], domain, load: load)
+                |> AshAi.Serializer.serialize_value(action.returns, [], domain,
+                  load: resolved_load
+                )
                 |> Jason.encode!()
               else
                 "success"
@@ -345,6 +357,26 @@ defmodule AshAi.Tools do
     end
 
     result
+  end
+
+  # Reduces the input arguments to only include keys that are defined Arguments or Attributes on the Action.
+  defp extract_action_params(input_arguments, action) do
+    allowed_keys =
+      action.arguments
+      |> Enum.map(&to_string(&1.name))
+      |> MapSet.new()
+
+    # 'Read' actions do not have an :accept field, so this check safely ignores them.
+    allowed_keys =
+      if Map.has_key?(action, :accept) do
+        Enum.reduce(action.accept || [], allowed_keys, fn attr, acc ->
+          MapSet.put(acc, to_string(attr))
+        end)
+      else
+        allowed_keys
+      end
+
+    Map.take(input_arguments, MapSet.to_list(allowed_keys))
   end
 
   defp serialize_errors(errors) do

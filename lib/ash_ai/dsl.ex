@@ -26,17 +26,16 @@ defmodule AshAi.Dsl do
       type: :any,
       default: [],
       doc: """
-              A list of relationships and calculations to load, or an anonymous function/1.
+      A list of relationships and calculations to load, or an anonymous function/1.
 
-              Note that loaded fields can include private attributes, which will then be included in the tool's response. However, private attributes cannot be used for filtering, sorting, or aggregation.
+      Note that loaded fields can include private attributes, which will then be included in the tool's response. However, private attributes cannot be used for filtering, sorting, or aggregation.
 
-              If a function is provided, it will be called with the tool input (a Map with **String keys**)
-              and must return the final load list.
+      If a function is provided, it will be called with the tool input (a Map with **String keys**) and must return the final load list.
 
-              Example:
-                  load fn input ->
-                    [schedule: [date: input["date"]]] # Use string keys!
-                  end
+      ## Example
+      load fn input ->
+        [schedule: [date: input["date"]]] # Use string keys!
+      end
       """
     ],
     async: [type: :boolean, default: true],

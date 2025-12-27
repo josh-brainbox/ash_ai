@@ -17,12 +17,13 @@ defmodule AshAi.Tools do
   def to_function(
         %Tool{
           name: name,
-          domain: domain,
+          domain: _domain,
           resource: resource,
           action: action,
           async: async,
           description: description,
-          action_parameters: action_parameters
+          action_parameters: _action_parameters,
+          arguments: _tool_arguments
         } = tool
       ) do
     name = to_string(name)
@@ -33,7 +34,7 @@ defmodule AshAi.Tools do
           "Call the #{action.name} action on the #{inspect(resource)} resource"
       )
 
-    parameter_schema = parameter_schema(domain, resource, action, action_parameters)
+    parameter_schema = parameter_schema(tool)
 
     LangChain.Function.new!(%{
       name: name,
@@ -52,27 +53,20 @@ defmodule AshAi.Tools do
           resource: resource,
           action: action,
           load: load,
-          identity: identity
+          identity: identity,
+          arguments: tool_arguments
         },
-        arguments,
+        client_arguments,
         context
       ) do
     tool_name = to_string(name)
     # Handle nil arguments from LangChain/MCP clients
-    arguments = arguments || %{}
+    arguments = client_arguments || %{}
 
     actor = context[:actor]
     tenant = context[:tenant]
 
-    # This prevents crashing on load arguments that are not explicitly defined in the action
-    input = extract_action_params(arguments["input"] || %{}, action)
-
-    resolved_load =
-      case load do
-        func when is_function(func, 1) -> func.(arguments["input"] || %{})
-        list when is_list(list) -> list
-        _ -> []
-      end
+    client_input = arguments["input"] || %{}
 
     opts = [domain: domain, actor: actor, tenant: tenant, context: context[:context] || %{}]
 
@@ -91,6 +85,16 @@ defmodule AshAi.Tools do
 
     result =
       try do
+        validate_inputs!(client_input, action, tool_arguments)
+        input = Map.take(client_input, valid_action_inputs(action))
+
+        resolved_load =
+          case load do
+            func when is_function(func, 1) -> func.(client_input)
+            list when is_list(list) -> list
+            _ -> []
+          end
+
         case action.type do
           :read ->
             sort =
@@ -347,6 +351,9 @@ defmodule AshAi.Tools do
            |> AshJsonApi.Error.to_json_api_errors(resource, error, action.type)
            |> serialize_errors()
            |> Jason.encode!()}
+      catch
+        {:tool_error, json_error, context} ->
+          {:ok, json_error, context}
       end
 
     if on_end = callbacks[:on_tool_end] do
@@ -357,26 +364,6 @@ defmodule AshAi.Tools do
     end
 
     result
-  end
-
-  # Reduces the input arguments to only include keys that are defined Arguments or Attributes on the Action.
-  defp extract_action_params(input_arguments, action) do
-    allowed_keys =
-      action.arguments
-      |> Enum.map(&to_string(&1.name))
-      |> MapSet.new()
-
-    # 'Read' actions do not have an :accept field, so this check safely ignores them.
-    allowed_keys =
-      if Map.has_key?(action, :accept) do
-        Enum.reduce(action.accept || [], allowed_keys, fn attr, acc ->
-          MapSet.put(acc, to_string(attr))
-        end)
-      else
-        allowed_keys
-      end
-
-    Map.take(input_arguments, MapSet.to_list(allowed_keys))
   end
 
   defp serialize_errors(errors) do
@@ -423,7 +410,13 @@ defmodule AshAi.Tools do
     end)
   end
 
-  defp parameter_schema(_domain, resource, action, action_parameters) do
+  defp parameter_schema(%Tool{
+         domain: _domain,
+         resource: resource,
+         action: action,
+         action_parameters: action_parameters,
+         arguments: tool_arguments
+       }) do
     attributes =
       if action.type in [:action, :read] do
         %{}
@@ -457,6 +450,34 @@ defmodule AshAi.Tools do
         )
       end)
 
+    # We iterate over the tool DSL arguments and merge them into the same 'properties' map to maintain a flat list of inputs for the agent.
+    properties =
+      Enum.reduce(tool_arguments, properties, fn argument, props ->
+        # We construct a map that mimics an Ash.Resource.Argument so we can reuse the existing OpenApi the existing OpenApi type conversion logic (Ash Type -> JSON Schema)..
+        tool_argument = %{
+          name: argument.name,
+          type: argument.type,
+          constraints: argument.constraints,
+          allow_nil?: argument.allow_nil?,
+          default: argument.default,
+          description: argument.description
+        }
+
+        Map.put(
+          props,
+          argument.name,
+          AshAi.OpenApi.resource_write_attribute_type(tool_argument, resource, :create)
+        )
+      end)
+
+    required_tool_arguments =
+      tool_arguments
+      |> Enum.filter(&(not &1.allow_nil?))
+      |> Enum.map(& &1.name)
+
+    required_action_arguments =
+      AshAi.OpenApi.required_write_attributes(resource, action.arguments, action)
+
     props_with_input =
       if Enum.empty?(properties) do
         %{}
@@ -466,7 +487,7 @@ defmodule AshAi.Tools do
             type: :object,
             properties: properties,
             additionalProperties: false,
-            required: AshAi.OpenApi.required_write_attributes(resource, action.arguments, action)
+            required: Enum.uniq(required_action_arguments ++ required_tool_arguments)
           }
         }
       end
@@ -682,4 +703,42 @@ defmodule AshAi.Tools do
   end
 
   defp parse_error(error), do: error
+
+  defp validate_inputs!(client_input, action, tool_arguments) do
+    allowed_keys =
+      MapSet.new(valid_action_inputs(action) ++ Enum.map(tool_arguments, &to_string(&1.name)))
+
+    unknown_keys = MapSet.difference(MapSet.new(Map.keys(client_input)), allowed_keys)
+
+    if MapSet.size(unknown_keys) > 0 do
+      error_msg =
+        "Unknown arguments provided: #{Enum.join(unknown_keys, ", ")}. Valid arguments are: #{Enum.join(allowed_keys, ", ")}"
+
+      json_error =
+        %{
+          errors: [
+            %{
+              code: "invalid_argument",
+              detail: error_msg,
+              source: %{pointer: "/input"}
+            }
+          ]
+        }
+        |> Jason.encode!()
+
+      throw({:tool_error, json_error, %{error: error_msg}})
+    else
+      :ok
+    end
+  end
+
+  defp valid_action_inputs(action) do
+    names = Enum.map(action.arguments, &to_string(&1.name))
+
+    if Map.has_key?(action, :accept) do
+      names ++ Enum.map(action.accept, &to_string/1)
+    else
+      names
+    end
+  end
 end

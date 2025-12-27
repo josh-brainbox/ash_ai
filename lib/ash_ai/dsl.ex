@@ -12,6 +12,37 @@ defmodule AshAi.Dsl do
 
   require Ash.Expr
 
+  @tool_argument_schema [
+    name: [
+      type: :atom,
+      required: true,
+      doc: "The name of the argument."
+    ],
+    type: [
+      type: :any,
+      required: true,
+      doc: "The Ash type of the argument (e.g., :string, :date, :integer)."
+    ],
+    constraints: [
+      type: :keyword_list,
+      default: [],
+      doc: "Type constraints (e.g., [max_length: 10]). These are converted to JSON Schema rules."
+    ],
+    description: [
+      type: :string,
+      doc: "A description for the Agent."
+    ],
+    allow_nil?: [
+      type: :boolean,
+      default: true,
+      doc: "If set to `false`, the argument is marked as required in the generated JSON Schema."
+    ],
+    default: [
+      type: :any,
+      doc: "The default value if not provided."
+    ]
+  ]
+
   @tool_schema [
     name: [type: :atom, required: true],
     resource: [type: {:spark, Ash.Resource}, required: true],
@@ -146,6 +177,14 @@ defmodule AshAi.Dsl do
     ]
   }
 
+  @tool_argument %Spark.Dsl.Entity{
+    name: :argument,
+    schema: @tool_argument_schema,
+    describe: "An argument to be passed to the tool.",
+    target: AshAi.Tool.Argument,
+    args: [:name, :type]
+  }
+
   @tool %Spark.Dsl.Entity{
     name: :tool,
     describe: """
@@ -163,7 +202,10 @@ defmodule AshAi.Dsl do
     ],
     target: AshAi.Tool,
     schema: @tool_schema,
-    args: [:name, :resource, :action]
+    args: [:name, :resource, :action],
+    entities: [
+      arguments: [@tool_argument]
+    ]
   }
 
   @tools %Spark.Dsl.Section{

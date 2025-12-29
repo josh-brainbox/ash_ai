@@ -85,8 +85,8 @@ defmodule AshAi.Tools do
 
     result =
       try do
-        validate_inputs!(client_input, action, tool_arguments)
-        input = Map.take(client_input, valid_action_inputs(action))
+        validate_inputs!(resource, client_input, action, tool_arguments)
+        input = Map.take(client_input, valid_action_inputs(resource, action))
 
         resolved_load =
           case load do
@@ -704,9 +704,11 @@ defmodule AshAi.Tools do
 
   defp parse_error(error), do: error
 
-  defp validate_inputs!(client_input, action, tool_arguments) do
+  defp validate_inputs!(resource, client_input, action, tool_arguments) do
     allowed_keys =
-      MapSet.new(valid_action_inputs(action) ++ Enum.map(tool_arguments, &to_string(&1.name)))
+      MapSet.new(
+        valid_action_inputs(resource, action) ++ Enum.map(tool_arguments, &to_string(&1.name))
+      )
 
     unknown_keys = MapSet.difference(MapSet.new(Map.keys(client_input)), allowed_keys)
 
@@ -732,13 +734,9 @@ defmodule AshAi.Tools do
     end
   end
 
-  defp valid_action_inputs(action) do
-    names = Enum.map(action.arguments, &to_string(&1.name))
-
-    if Map.has_key?(action, :accept) do
-      names ++ Enum.map(action.accept, &to_string/1)
-    else
-      names
-    end
+  defp valid_action_inputs(resource, action) do
+    resource
+    |> Ash.Resource.Info.action_inputs(action.name)
+    |> Enum.map(&to_string/1)
   end
 end
